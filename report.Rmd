@@ -1,0 +1,49 @@
+---
+title: "Bahia Lomas Red Knot report, tables and figures"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman", quiet = TRUE)
+pacman::p_load(dplyr, lubridate, sf, rnaturalearth, motus)
+```
+
+```{r load_data}
+rekn_deploy <- read.csv("Data/tag-deployments.csv", stringsAsFactors = FALSE) %>%
+  filter(deploymentStatus == "active",
+         !is.na(latitude)) %>%
+  mutate(spp = toupper(gsub("(\\b[A-Z][a-z])|.", "\\1", motusEnglishName))) %>%
+  select(tagID, tagPL = period, species = motusEnglishName, spp, age, weight)
+
+proj <- 174
+# Last updated 27 March 2019
+rekn_full <- tagme(proj, update = FALSE, forceMeta = TRUE, dir = "Data/") %>%
+  tbl("alltags") %>% collect() %>% as.data.frame()
+```
+
+
+```{r filter_data}
+rekn <- rekn_full %>% 
+  # Join with deployment info
+  left_join(rekn_deploy, by = c("motusTagID" = "tagID")) %>%
+  filter(motusTagID %in% rekn_deploy$tagID,   # Only Bahia Lomas project (#174) tags
+         runLen > 2,                          # Basic filter
+         freqsd < 0.075,                      # Basic filter
+         !is.na(tagDeployLat),                # Omits one apparent test deployment?
+         ts > tagDeployStart,                 # Detections occur after deployment
+         grepl("BahiaLomas", fullID)) %>%     # Only Bahia Lomas project (#174) tags
+  mutate(ts = as_datetime(ts, tz = "UTC"),
+         tagDeployEnd = as_datetime(tagDeployEnd, tz = "UTC"),
+         tagDeployStart = as_datetime(tagDeployStart, tz = "UTC"),
+         date = as.Date(ts),
+         ts_hour = as.POSIXct(round(ts, "hours")),
+         label = paste(spp, motusTagID, sep = "_")) %>%
+  group_by(motusTagID) %>%
+  mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days"))) %>%
+  select(spp, age, weight, motusTagID, mfgID, tagDeployStart, tagDeployEnd, 
+         date, ts, ts_hour, since_rel, sig, runID, runLen, freqsd,
+         recvDeployLat, recvDeployLon, recvSiteName, antType, antBearing)
+```
+
+
