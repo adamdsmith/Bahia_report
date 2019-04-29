@@ -7,23 +7,57 @@ output: html_document
 knitr::opts_chunk$set(echo = FALSE)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman", quiet = TRUE)
 pacman::p_load(dplyr, lubridate, sf, rnaturalearth, motus)
+source("R/detection_loc.R")
 ```
 
-```{r load_data}
+```{r receivers}
+# Network-wide receiver information
+motus_recvs_full <- tagme(proj, update = FALSE, forceMeta = TRUE, dir = "Data/") %>%
+  tbl("recvDeps") %>% collect() %>% as.data.frame()
+
+# Receivers active from tag deployment through July of deploy year
+active_recvs <- motus_recvs_full %>%
+  filter(!is.na(tsStart), !is.na(latitude)) %>%
+  mutate(tsStart = as_datetime(tsStart, tz = "UTC"),
+         # for deployments with no end dates, make end date today
+         tsEnd = as_datetime(ifelse(is.na(tsEnd), with_tz(Sys.time(), tzone = "UTC"), tsEnd), tz = "UTC"),
+         # add variable 'active' that indicates if receiver was active during REKN tag activity
+         active = int_overlaps(interval(tsStart, tsEnd),  # receiver interval
+                               interval(min(rekn$tagDeployStart), as.POSIXct("2018-07-31")))) %>% # REKN interval
+  rename(recvLat = latitude, recvLon = longitude, recvDeployName = name,
+         recvStart = tsStart, recvEnd = tsEnd, recvProjID = projectID, recvDeployID = deployID)
+
+# Bahia Lomas receivers
+bahia_recvs <- read.csv("Data/receiver-deployments.csv", stringsAsFactors = FALSE)
+bahia_ants <- read.csv("Data/antenna-deployments.csv", stringsAsFactors = FALSE) %>%
+  select(recvDeployID:antennaType, trueBearing)
+bahia_recvs <- left_join(bahia_recvs, bahia_ants, by = "recvDeployID") %>%
+  mutate(tsStart = as_datetime(tsStart, tz = "UTC"),
+         tsEnd = as_datetime(tsEnd, tz = "UTC")) %>%
+  filter(tsStart < as.POSIXct("2018-07-31")) %>%
+  select(recvDeployID, recvSiteName = siteName, tsStart, tsEnd, 
+         recvLat = latitude, recvLon = longitude, port, antennaType, trueBearing) %>%
+  # Approximate center of detection zones for each antenna and add to receiver data
+  group_by_all() %>%
+  do(detection_loc(.$recvLat, .$recvLon, .$trueBearing, 3))
+```
+
+
+```{r tag_detections}
+# Tag deployments
 rekn_deploy <- read.csv("Data/tag-deployments.csv", stringsAsFactors = FALSE) %>%
   filter(deploymentStatus == "active",
          !is.na(latitude)) %>%
   mutate(spp = toupper(gsub("(\\b[A-Z][a-z])|.", "\\1", motusEnglishName))) %>%
   select(tagID, tagPL = period, species = motusEnglishName, spp, age, weight)
 
+# Full detection history
 proj <- 174
 # Last updated 27 March 2019
 rekn_full <- tagme(proj, update = FALSE, forceMeta = TRUE, dir = "Data/") %>%
   tbl("alltags") %>% collect() %>% as.data.frame()
-```
 
-
-```{r filter_data}
+# Detection histories
 rekn <- rekn_full %>% 
   # Join with deployment info
   left_join(rekn_deploy, by = c("motusTagID" = "tagID")) %>%
@@ -38,12 +72,22 @@ rekn <- rekn_full %>%
          tagDeployStart = as_datetime(tagDeployStart, tz = "UTC"),
          date = as.Date(ts),
          ts_hour = as.POSIXct(round(ts, "hours")),
+         chile = recvProjID == 174,
          label = paste(spp, motusTagID, sep = "_")) %>%
   group_by(motusTagID) %>%
   mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days"))) %>%
   select(spp, age, weight, motusTagID, mfgID, tagDeployStart, tagDeployEnd, 
-         date, ts, ts_hour, since_rel, sig, runID, runLen, freqsd,
-         recvDeployLat, recvDeployLon, recvSiteName, antType, antBearing)
+         date, ts, ts_hour, chile, since_rel, sig, runID, runLen, freqsd,
+         recvSiteName, recvDeployID, recvDeployLat, recvDeployLon, antType, antBearing, port)
+
+rekn_chile <- filter(rekn, chile)
+
+chile_summary <- rekn_chile %>%
+  group_by(tagDeployStart, add = TRUE) %>%
+  # Get first and last Chile detections
+  summarize(firstChile = min(ts),
+            finalChile = max(ts)) %>%
+  mutate(chileStay = as.numeric(difftime(finalChile, tagDeployStart, units = "days")))
 ```
 
 
