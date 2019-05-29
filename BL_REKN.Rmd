@@ -1,0 +1,185 @@
+---
+title: "Bahia Lomas Red Knot report, tables and figures"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman", quiet = TRUE)
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes", quiet = TRUE)
+if (!requireNamespace("nrsmisc", quietly = TRUE)) remotes::install_github("adamdsmith/nrsmisc")
+pacman::p_load(dplyr, tidyr, lubridate, sf, rnaturalearth, motus, nrsmisc)
+source("R/detection_loc.R")
+get_update <- FALSE
+```
+
+```{r tag_detections, cache=TRUE}
+# Bahia project
+proj <- 174
+
+# Tag deployments
+rekn_deploy <- read.csv("Data/tag-deployments.csv", stringsAsFactors = FALSE) %>%
+  filter(deploymentStatus == "active",
+         !is.na(latitude)) %>%
+  mutate(spp = toupper(gsub("(\\b[A-Z][a-z])|.", "\\1", motusEnglishName))) %>%
+  select(tagID, tagPL = period, species = motusEnglishName, spp, age, weight)
+
+# Full detection history
+# Last updated 27 March 2019
+rekn_full <- tagme(proj, update = get_update, forceMeta = TRUE, dir = "Data/") %>%
+  tbl("alltags") %>% collect() %>% as.data.frame()
+
+# Detection histories
+rekn <- rekn_full %>% 
+  # Join with deployment info
+  left_join(rekn_deploy, by = c("motusTagID" = "tagID")) %>%
+  filter(motusTagID %in% rekn_deploy$tagID,   # Only Bahia Lomas project (#174) tags
+         runLen > 2,                          # Basic filter
+         freqsd < 0.075,                      # Basic filter
+         !is.na(tagDeployLat),                # Omits one apparent test deployment?
+         ts > tagDeployStart,                 # Detections occur after deployment
+         grepl("BahiaLomas", fullID)) %>%     # Only Bahia Lomas project (#174) tags
+  mutate(ts = as_datetime(ts, tz = "UTC"),
+         tagDeployEnd = as_datetime(tagDeployEnd, tz = "UTC"),
+         tagDeployStart = as_datetime(tagDeployStart, tz = "UTC"),
+         date = as.Date(ts),
+         ts_hour = as.POSIXct(round(ts, "hours")),
+         chile = recvProjID == 174,
+         label = paste(spp, motusTagID, sep = "_")) %>%
+  group_by(motusTagID) %>%
+  mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days"))) %>%
+  select(spp, age, weight, motusTagID, mfgID, tagDeployStart, tagDeployEnd, 
+         date, ts, ts_hour, chile, since_rel, sig, runID, runLen, freqsd,
+         recvSiteName, recvDeployID, port) %>%
+  arrange(motusTagID, runID, ts)
+
+# Detection times
+rekn_times <- rekn %>%
+  group_by(spp, age, weight, motusTagID, mfgID, tagDeployStart, tagDeployEnd, chile, recvSiteName, recvDeployID,
+           port, runID) %>%
+  summarize(det_time = round(as.numeric(difftime(max(ts), min(ts), units = "mins")), 3),
+            date = min(date))
+
+rekn_chile <- filter(rekn, chile)
+rekn_times_chile <- filter(rekn_times, chile)
+
+chile_summary <- rekn_chile %>%
+  group_by(tagDeployStart, spp, add = TRUE) %>%
+  # Get first and last Chile detections
+  summarize(firstChile = min(ts),
+            finalChile = max(ts),
+            leave_date = as.Date(finalChile),
+            leave_stn = recvSiteName[which.max(ts)]) %>%
+  mutate(chileStay = as.numeric(difftime(finalChile, tagDeployStart, units = "days")))
+```
+
+```{r receivers, cache=TRUE}
+# Network-wide receiver information
+motus_recvs_full <- tagme(proj, update = get_update, forceMeta = TRUE, dir = "Data/") %>%
+  tbl("recvDeps") %>% collect() %>% as.data.frame()
+
+# Receivers active from tag deployment through July of deploy year
+active_recvs <- motus_recvs_full %>%
+  filter(!is.na(tsStart), !is.na(latitude)) %>%
+  mutate(tsStart = as_datetime(tsStart, tz = "UTC"),
+         # for deployments with no end dates, make end date today
+         tsEnd = as_datetime(ifelse(is.na(tsEnd), with_tz(Sys.time(), tzone = "UTC"), tsEnd), tz = "UTC"),
+         # add variable 'active' that indicates if receiver was active during REKN tag activity
+         active = int_overlaps(interval(tsStart, tsEnd),  # receiver interval
+                               interval(min(rekn$tagDeployStart), as.POSIXct("2018-07-31")))) %>% # REKN interval
+  rename(recvLat = latitude, recvLon = longitude, recvDeployName = name,
+         recvStart = tsStart, recvEnd = tsEnd, recvProjID = projectID, recvDeployID = deployID)
+
+compass <- data.frame(antBin = c("N","NNE","NE","ENE","E","ESE", "SE", "SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"),
+                      antBinDeg = seq(0, 337.5, by = 22.5),
+                      stringsAsFactors = FALSE)
+
+# Bahia Lomas receivers
+bahia_recvs <- read.csv("Data/receiver-deployments.csv", stringsAsFactors = FALSE) %>%
+  filter(latitude < -50)
+bahia_ants <- read.csv("Data/antenna-deployments.csv", stringsAsFactors = FALSE) %>%
+  select(recvDeployID:antennaType, trueBearing) %>%
+  mutate(antBin = get_16wind(trueBearing))
+bahia_recvs <- left_join(bahia_recvs, bahia_ants, by = "recvDeployID") %>%
+  mutate(tsStart = as_datetime(tsStart, tz = "UTC"),
+         tsEnd = as_datetime(tsEnd, tz = "UTC")) %>%
+  filter(tsStart < as.POSIXct("2018-07-31")) %>%
+  select(recvDeployID, recvSiteName = siteName, tsStart, tsEnd, 
+         recvLat = latitude, recvLon = longitude, port, antennaType, antBin) %>%
+  left_join(compass, by = "antBin") %>%
+  # Approximate center of detection zones for each antenna and add to receiver data
+  group_by_all() %>%
+  do(detection_loc(.$recvLat, .$recvLon, .$antBinDeg, 7.5))
+```
+
+# Bahia Lomas receiver station activity
+
+```{r, warning=FALSE, cache=TRUE}
+dly_recv_log <- ungroup(bahia_recvs) %>% select(recvSiteName:tsEnd) %>%
+  distinct() %>% # Drop antenna-related duplicates
+  rowwise() %>%
+  do(data.frame(recvSiteName = .$recvSiteName, 
+                date = seq(as.Date(.$tsStart), as.Date(.$tsEnd), by = "day"))) %>%
+  distinct() %>%
+  # Dates outside detections irrelevant
+  filter(between(date, min(rekn_chile$date), max(rekn_chile$date))) %>%
+  # Add down times
+  mutate(active = case_when(
+    recvSiteName == "E. MiraMar" & between(date, as.Date("2018-02-16"), as.Date("2018-04-05"))      ~ FALSE,
+    recvSiteName == "Punta Catalina" & !between(date, as.Date("2018-02-26"), as.Date("2018-03-21")) ~ FALSE,
+    TRUE ~ TRUE)) %>%
+  # Complete data set over period of interest
+  complete(recvSiteName, date, fill = list(active = FALSE))
+ggplot(dly_recv_log, aes(date, recvSiteName)) + geom_point(aes(color = active))
+dly_recv_count <- filter(dly_recv_log, active) %>% group_by(date) %>% count(name = "n_active_recv")
+```
+
+# Site-level summary plots
+
+## Last detection by Bahia Lomas station
+```{r}
+chile_summary %>%
+  ggplot(aes(x = leave_stn)) +
+  geom_bar() +
+  facet_grid(spp ~ .)
+```
+
+### By week and Bahia Lomas station
+```{r}
+chile_summary %>%
+  ggplot(aes(x = leave_date, fill = leave_stn)) +
+  geom_histogram(binwidth = 7) +
+  facet_grid(spp ~ .)
+```
+
+## Number of individuals detected daily
+
+```{r}
+rekn_chile %>% select(date, motusTagID, spp) %>% distinct() %>% 
+  group_by(date, spp) %>% count() %>%
+  ggplot(aes(date, perc)) + 
+  geom_segment(aes(x=date, xend=date, y=0, yend=n)) + theme_bw() +
+  labs(x = "Date", y = "# individuals detected") +
+  facet_grid(spp ~ ., scales = "free_y")
+```
+
+## Weekly total time of detection
+
+```{r}
+chile_window <- seq.Date(min(rekn_times_chile$date), max(rekn_times_chile$date), by = "day")
+week_midpts <- seq.Date(from = as.Date("2018-01-04"), length.out = 30, by = "week")
+week_midpts <- week_midpts[week_midpts %in% chile_window]
+
+rekn_times_chile %>% ungroup() %>%
+  select(date, motusTagID, recvSiteName, spp, det_time) %>% 
+  mutate(week = lubridate::week(date)) %>%
+  group_by(week, recvSiteName, spp) %>% 
+  summarize(tot_det_time = sum(det_time)/60) %>%
+  ggplot(aes(week, tot_det_time, fill = recvSiteName)) + geom_bar(stat = "identity") + theme_bw() +
+  scale_x_continuous("Date", 
+                     breaks = week(week_midpts),  
+                     labels = every_nth(format(week_midpts, format = "%d %b"), 4, inverse = TRUE)) +
+  labs(y = "Total detection time (hours)") +
+  facet_grid(spp ~ ., scales = "free_y")
+```
+
