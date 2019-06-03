@@ -4,15 +4,20 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, fig.width = 7.5)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message=FALSE, fig.width = 6.5)
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman", quiet = TRUE)
 if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes", quiet = TRUE)
 if (!requireNamespace("nrsmisc", quietly = TRUE)) remotes::install_github("adamdsmith/nrsmisc")
 if (!requireNamespace("ggmap", quietly = TRUE)) remotes::install_github("dkahle/ggmap")
-pacman::p_load(reshape, dplyr, tidyr, lubridate, sf, rnaturalearth, motus, nrsmisc, ggplot2, ggmap, scales)
+pacman::p_load(reshape, raster, dplyr, tidyr, lubridate, sf, rnaturalearth, motus, nrsmisc, 
+               oce, RStoolbox, ggplot2, ggmap, scales)
 source("R/detection_loc.R")
 source("R/show_active_recv.R")
+source("R/geo_helpers.R")
+source("R/tides.R")
 get_update <- FALSE
+# Set Google Maps API key
+register_google(Sys.getenv("goog_key"))
 ```
 
 ```{r tag_detections, cache=TRUE}
@@ -50,20 +55,28 @@ rekn <- rekn_full %>%
          label = paste(spp, motusTagID, sep = "_")) %>%
   group_by(motusTagID) %>%
   mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days"))) %>%
-  select(spp, age, weight, motusTagID, mfgID, tagDeployStart, tagDeployEnd, 
+  select(spp, age, weight, motusTagID, mfgID, tagBI, tagDeployStart, tagDeployEnd, 
          date, ts, ts_hour, chile, since_rel, sig, runID, runLen, freqsd,
          recvSiteName, recvDeployID, port) %>%
   arrange(motusTagID, runID, ts)
 
-# Detection times
+# Detection length
 rekn_times <- rekn %>%
   group_by(spp, age, weight, motusTagID, mfgID, tagDeployStart, tagDeployEnd, chile, recvSiteName, recvDeployID,
            port, runID) %>%
-  summarize(det_time = round(as.numeric(difftime(max(ts), min(ts), units = "mins")), 3),
+  summarize(det_len = round(as.numeric(difftime(max(ts), min(ts), units = "mins")), 3),
             date = min(date))
-
+# Detection lengths by hour
+rekn_times_h <- rekn %>%
+  group_by(spp, age, weight, motusTagID, mfgID, tagDeployStart, tagDeployEnd, chile, recvSiteName, recvDeployID,
+           port, runID, ts_hour) %>%
+  summarize(det_len = round(as.numeric(difftime(max(ts), min(ts), units = "mins")), 3),
+            det_len = ifelse(det_len < 0.05, round(min(tagBI)/60, 3), det_len),
+            date = min(date),
+            sigSD = sd(sig))
 rekn_chile <- filter(rekn, chile)
 rekn_times_chile <- filter(rekn_times, chile)
+rekn_times_h_chile <- filter(rekn_times_h, chile)
 
 chile_summary <- rekn_chile %>%
   group_by(tagDeployStart, spp, add = TRUE) %>%
@@ -169,7 +182,7 @@ rekn_chile %>% select(date, motusTagID, spp) %>% distinct() %>%
   scale_y_continuous(breaks = pretty_breaks()) +
   facet_grid(spp ~ ., scales = "free_y") +
   # Add receiver activity
-  geom_path(data = show_active_recv(8.5, 0.25, NA_inactive = TRUE),
+  geom_path(data = show_active_recv(8.5, 0.25, NA_inactive = TRUE, input = dly_recv_log),
             aes(y = y, color = recvSiteName), lwd = 1)
 ```
 
@@ -185,16 +198,16 @@ week_midpts <- data.frame(midpt = week_midpts,
                           week = lubridate::week(week_midpts))
 
 rekn_times_chile %>% ungroup() %>%
-  select(date, motusTagID, recvSiteName, spp, det_time) %>% 
+  select(date, motusTagID, recvSiteName, spp, det_len) %>% 
   mutate(week = lubridate::week(date)) %>%
   group_by(week, recvSiteName, spp) %>% 
-  summarize(tot_det_time = sum(det_time)/60) %>%
+  summarize(tot_det_len = sum(det_len)/60) %>%
   left_join(week_midpts, by = "week") %>%
-  ggplot(aes(midpt, tot_det_time, fill = recvSiteName)) + geom_bar(stat = "identity") + theme_bw() +
-  labs(x = "Date", y = "Total detection time (hours)", fill = "", color = "") +
+  ggplot(aes(midpt, tot_det_len, fill = recvSiteName)) + geom_bar(stat = "identity") + theme_bw() +
+  labs(x = "Date", y = "Cumulative detection time (hours)", fill = "", color = "") +
   facet_grid(spp ~ ., scales = "free_y") +
   # Add receiver activity
-  geom_path(data = show_active_recv(375, 12.5, NA_inactive = TRUE), 
+  geom_path(data = show_active_recv(375, 12.5, NA_inactive = TRUE, input = dly_recv_log), 
             aes(date, y, color = recvSiteName), lwd = 1)
   
 ```
@@ -205,17 +218,17 @@ Here, for each day, we sum the total time of detection of all individual Hudsoni
 
 ```{r, fig.height=4}
 rekn_times_chile %>% ungroup() %>%
-  select(date, motusTagID, recvSiteName, spp, det_time) %>% 
+  select(date, motusTagID, recvSiteName, spp, det_len) %>% 
   group_by(date, recvSiteName, spp) %>% 
-  summarize(tot_det_time = sum(det_time)/60) %>%
+  summarize(tot_det_len = sum(det_len)/60) %>%
   ggplot(aes(date, recvSiteName)) + 
   # Add receiver activity to background
-  geom_point(data = show_active_recv(spp = c("HUGO", "REKN")), 
+  geom_point(data = show_active_recv(spp = c("HUGO", "REKN"), input = dly_recv_log), 
              color = "gray70", size = 1) +
-  # Detection time
-  geom_point(aes(color = tot_det_time, size = tot_det_time)) + 
+  # Detection length
+  geom_point(aes(color = tot_det_len, size = tot_det_len)) + 
   scale_size(range = c(1, 10), guide = "none") + theme_bw() +
-  scale_color_viridis_c("Total detection time:", trans = "log2", 
+  scale_color_viridis_c("Cumulative detection time:", trans = "log2", 
                         breaks = c(0.01666, 0.16667, 1, 6, 24, 168, 504), 
                         labels = c("1min", "10min", "1h", "6h", "1d", "1wk", "3wk"),
                         limits = c(NA, 504),
@@ -237,7 +250,7 @@ rekn_chile %>% ungroup() %>%
   tally() %>%
   ggplot(aes(date, recvSiteName)) + 
   # Add receiver activity
-  geom_point(data = show_active_recv(spp = c("HUGO", "REKN")), 
+  geom_point(data = show_active_recv(spp = c("HUGO", "REKN"), input = dly_recv_log), 
              color = "gray70", size = 1) +
   geom_point(aes(color = n, size = n)) + 
   scale_size(range = c(1, 10), guide = "none") + theme_bw() +
@@ -264,7 +277,7 @@ rekn_chile %>% ungroup() %>%
   geom_point(aes(group = recvSiteName, color = recvSiteName), size= 1) + 
   geom_path(aes(group = recvSiteName, color = recvSiteName), lwd = 1) + 
   # Add receiver activity
-  geom_path(data = show_active_recv(8.5, 0.35, NA_inactive = TRUE),
+  geom_path(data = show_active_recv(8.5, 0.35, NA_inactive = TRUE, input = dly_recv_log),
             aes(y = y, color = recvSiteName), lwd = 1) +
   scale_y_continuous("# individuals detected", breaks = pretty_breaks(), limits = c(0, NA)) +
   facet_grid(spp ~ ., scales = "free_y") + theme_bw() + labs(color = "")
@@ -278,7 +291,7 @@ Weekly number of Hudsonian Godwits (HUGO) and Red Knots (REKN) last detected by 
 chile_summary %>%
   ggplot(aes(x = leave_date, color = leave_stn, fill = leave_stn)) +
   geom_histogram(binwidth = 7) +
-  geom_path(data = show_active_recv(2.77, 0.1, "leave_stn", NA_inactive = TRUE), 
+  geom_path(data = show_active_recv(2.77, 0.1, "leave_stn", NA_inactive = TRUE, input = dly_recv_log), 
             aes(date, y), lwd = 1) +
   scale_y_continuous(breaks = pretty_breaks(n = 4)) +
   facet_grid(spp ~ ., scales = "free_y") + theme_bw() +
@@ -287,44 +300,65 @@ chile_summary %>%
 
 ## Relative Red Knot detections within and among stations
 
-This distinguishes Red Knot detections by receiving station antenna, showing the apparent relative site use within a station's detection zones as well as among stations. This again illustrates that most detections occurred near and northwest of the capture location (red crosshair) at E. Pepita, with considerably shorter total detection duration, and numbers of individuals detected, as one moves east along the southern shore of Bahia Lomas towards Punta Catalina. Note however that the relative use of E. MiraMar is likely considerably underestimated due to station failure from mid-February to early April. See the next figure for a more equitable comparison of the relative use of the three primary detection sites (E. Pepita, E. MiraMar, and E. El Platano). It is important to note that total detection time is also a function of detectability, which is likely to be higher when birds are near the receiving station or flying. Thus, total detection time is likely not strictly an index of site use or importance. Points are located along the approximate antenna detection axis at a distance of 3 km from the receiving station.
+This distinguishes Red Knot detections by receiving station antenna, showing the apparent relative site use within a station's detection zones as well as among stations. Points are located along the approximate antenna detection axis at a distance of 3 km from the receiving station. This again illustrates that most detections occurred near and northwest of the capture location (red crosshair) at E. Pepita, with considerably shorter total detection duration, and numbers of individuals detected, as one moves east along the southern shore of Bahia Lomas towards Punta Catalina. Note however that the relative use of E. MiraMar is likely considerably underestimated due to station failure from mid-February to early April. See the next figure for a more equitable comparison of the relative use of the three primary detection sites (E. Pepita, E. MiraMar, and E. El Platano). It is important to note that cumulative detection time is also a function of detectability, which is likely to be higher when birds are near the receiving station or flying. Thus, cumulative detection time is likely not strictly an index of site use or importance. 
 
-```{r, fig.width = 6.5, fig.height=8, cache=TRUE, message=FALSE}
+```{r, fig.height=6, cache=TRUE}
 # recvs <- pull(bahia_recvs, recvSiteName) %>% unique()
 # recvs <- recvs[c(2,1,3,4)]
 ant_avail <- ungroup(bahia_recvs) %>% select(recvSiteName, antBin, det_lon, det_lat) %>% distinct()
 rekn_time_ant <- rekn_times_chile %>% ungroup() %>%
   filter(spp == "REKN") %>%
   left_join(bahia_recvs, by = c("recvSiteName", "recvDeployID", "port")) %>%
-  select(motusTagID, recvSiteName, antBin, det_lat, det_lon, det_time) %>% 
+  select(motusTagID, recvSiteName, antBin, det_lat, det_lon, det_len) %>% 
   group_by(recvSiteName, antBin, det_lat, det_lon) %>%
-  summarize(tot_det_time = sum(det_time)/60,
+  summarize(tot_det_len = sum(det_len)/60,
             n_ind = n_distinct(motusTagID)) %>%
   ungroup() %>%
-  complete(ant_avail, fill = list(tot_det_time = 0.005, n_ind = 0))
+  complete(ant_avail, fill = list(tot_det_len = 0.005, n_ind = 0))
 
-register_google(Sys.getenv("goog_key"))
-bl <- get_map(location = c(lon = -69.09, lat = -52.57), zoom = 10, maptype = "satellite")
+# Create Google Map satellite background (this proved faster to generate figures)
+bl <- get_map(location = c(lon = -69.09, lat = -52.57), scale = 4, zoom = 10, maptype = "hybrid")
+bl_rast <- ggmap_rast(bl)
+projection(bl_rast) <- CRS("+init=epsg:4326") # bounding box projection
+
+# Bring in habitat raster, "fix" extent, filter to intertidal, ection prior to reprojection as sf object
+hab <- raster("Data/bahia_lomas_habitats_v3.img") %>%
+  shift(x = 200, y = 9999900) %>%
+  projectRaster(crs = CRS("+init=epsg:4326"), method = "ngb") %>%
+  as.data.frame(xy = TRUE) %>%
+  filter(!is.na(bahia_lomas_habitats_v3),
+         bahia_lomas_habitats_v3 %in% 2:3) %>%
+  select(x, y, hab_code = bahia_lomas_habitats_v3) %>%
+  mutate(habitat = ifelse(hab_code == 2, "Mud-dominated", "Sand-dominated"))
+
 site_locs <- group_by(bahia_recvs, recvSiteName) %>% slice(1)
-ggmap(bl, extent = "device",
-      base_layer = ggplot(aes(x = det_lon, y = det_lat), data = rekn_time_ant)) +
-  # Relative detection time
-  geom_point(aes(size = tot_det_time, fill = tot_det_time), pch = 21) +
+
+ggRGB(bl_rast) +
+  coord_sf(crs = 4326) +
+  geom_tile(data = hab, aes(x, y, fill = habitat), alpha = 0.5) + 
+  geom_point(data = rekn_time_ant, aes(x = det_lon, y = det_lat,
+             size = tot_det_len, color = tot_det_len),
+             shape = 21, fill = NA, stroke = 3) +
   scale_size(guide = "none", range = c(5,12)) + theme_bw() +
-  scale_fill_viridis_c("Total detection time:", trans = "log2",
+  scale_fill_manual("Intertidal flat type",
+                    values = c("saddlebrown", "khaki1"),
+                    guide = guide_legend(order = 1, direction = "vertical")) +
+  scale_color_viridis_c("Cumulative detection time:", trans = "log2",
                        breaks = c(0.0166666, 1, 24, 168, 720, 3600),
                        labels = c("1min", "1h", "1d", "1wk", "1mo", "5mo"),
                        limits = c(0.005, 3600),
-                       guide = guide_colorbar(barwidth = grid::unit(0.5, "npc"), 
+                       guide = guide_colorbar(order = 2, barwidth = grid::unit(0.4, "npc"), 
                                               title.vjust = 0.8,
                                               title.position = "left")) +
   # Receiving stations locations
   geom_point(data = site_locs, aes(x = recvLon, y = recvLat),
              pch = 7, color = "white", size = 2.5) +
   # Number of individuals detected
-  geom_text(aes(label = n_ind), color = "grey70", fontface = "bold", size = 3) + 
+  geom_text(data = rekn_time_ant, aes(x = det_lon, y = det_lat, label = n_ind), 
+            color = "white", fontface = "bold", size = 3) + 
   annotate("point", x = -69.376211, y = -52.479484, color = "red", pch = 10, size = 3) +
-  theme(legend.position = "top",
+  xlim(c(-69.45, -68.7)) + ylim(c(-52.7, -52.4)) +
+  theme(legend.position = "top", 
         axis.text=element_blank(),
         axis.ticks=element_blank(),
         axis.title=element_blank(),
@@ -337,9 +371,9 @@ ggmap(bl, extent = "device",
 #   r_tmp <- filter(rekn_time_ant, recvSiteName ==r)
 #   ggmap(r_bl, extent = "device",
 #         base_layer = ggplot(aes(x = det_lon, y = det_lat), data = r_tmp)) +
-#     geom_point(aes(size = tot_det_time, fill = tot_det_time), pch = 21) +
+#     geom_point(aes(size = tot_det_len, fill = tot_det_len), pch = 21) +
 #     scale_size_area(guide = "none") + theme_bw() +
-#     scale_fill_viridis_c("Detection time (hours):",
+#     scale_fill_viridis_c("detection time (hours):",
 #                           guide = guide_colorbar(barwidth = grid::unit(0.15, "npc"), title.vjust = 0.8,
 #                                                  title.position = "left")) +
 #     geom_point(data = r_loc_df, aes(x = recvLon, y = recvLat),
@@ -357,46 +391,98 @@ ggmap(bl, extent = "device",
 
 ## Relative Red Knot detections within and among stations (peak activity)
 
-Here we focus the relative use of the three primary detection sites (E. Pepita, E. MiraMar, and E. El Platano) during a period (capture to mid-February) when most individual Red Knots (REKN) were present on the landscape and all three stations were fully functional. This again illustrates that the vast majority of detection time occurred near and northwest of the capture location (red crosshair) at E. Pepita, with considerably shorter total detection duration, and numbers of individuals detected, as one moves east along the southern shore of Bahia Lomas towards Punta Catalina. It is important to note that total detection time is also a function of detectability, which is likely to be higher when birds are near the receiving station or flying. Thus, total detection time is likely not strictly an index of site use or importance. Points are located along the approximate antenna detection axis at a distance of 3 km from the receiving station.
+Here we focus on the relative use of the three primary detection sites (E. Pepita, E. MiraMar, and E. El Platano) during a period (capture to mid-February) when most individual Red Knots (REKN) were present on the landscape and all three stations were fully functional. Points are located along the approximate antenna detection axis at a distance of 3 km from the receiving station. This again illustrates that the vast majority of detection time occurred near and northwest of the capture location (red crosshair) at E. Pepita, with considerably shorter total detection duration, and numbers of individuals detected, as one moves east along the southern shore of Bahia Lomas towards Punta Catalina. It is important to note that cumulative detection time is also a function of detectability, which is likely to be higher when birds are near the receiving station or flying. Thus, cumulative detection time is likely not strictly an index of site use or importance. 
 
-```{r, fig.width = 6.5, fig.height=8, cache=TRUE, message=FALSE}
+```{r, fig.height=6, cache=TRUE}
 feb_ant_avail <- filter(ant_avail, !grepl("Catalina", recvSiteName))
 feb_rekn_time_ant <- rekn_times_chile %>% ungroup() %>%
   filter(spp == "REKN", date <= ymd("2018-02-15")) %>%
   left_join(bahia_recvs, by = c("recvSiteName", "recvDeployID", "port")) %>%
-  select(motusTagID, recvSiteName, antBin, det_lat, det_lon, det_time) %>% 
+  select(motusTagID, recvSiteName, antBin, det_lat, det_lon, det_len) %>% 
   group_by(recvSiteName, antBin, det_lat, det_lon) %>%
-  summarize(tot_det_time = sum(det_time)/60,
+  summarize(tot_det_len = sum(det_len)/60,
             n_ind = n_distinct(motusTagID)) %>%
   ungroup() %>%
-  complete(feb_ant_avail, fill = list(tot_det_time = 0.0001, n_ind = 0))
+  complete(feb_ant_avail, fill = list(tot_det_len = 0.0001, n_ind = 0))
 feb_site_locs <- filter(bahia_recvs, !grepl("Catalina", recvSiteName)) %>%
   group_by(recvSiteName) %>% slice(1)
 
-# Absolute detection time
-ggmap(bl, extent = "device",
-      base_layer = ggplot(aes(x = det_lon, y = det_lat), data = feb_rekn_time_ant)) +
-  # Relative detection time
-  geom_point(aes(size = tot_det_time, fill = tot_det_time), pch = 21) +
+ggRGB(bl_rast) +
+  coord_sf(crs = 4326) +
+  geom_tile(data = hab, aes(x, y, fill = habitat), alpha = 0.5) + 
+  geom_point(data = feb_rekn_time_ant, aes(x = det_lon, y = det_lat,
+                                           size = tot_det_len, color = tot_det_len), 
+             shape = 21, fill = NA, stroke = 3) +
   scale_size(guide = "none", range = c(5,12)) + theme_bw() +
-  scale_fill_viridis_c("Total detection time:", trans = "log2",
+  scale_fill_manual("Intertidal flat type",
+                    values = c("saddlebrown", "khaki1"),
+                    guide = guide_legend(order = 1, direction = "vertical")) +
+  scale_color_viridis_c("Cumulative detection time:", trans = "log2",
                        breaks = c(1, 24, 168, 720, 2160),
                        labels = c("1h", "1d", "1wk", "1mo", "3mo"),
                        limits = c(1, NA),
-                       guide = guide_colorbar(barwidth = grid::unit(0.5, "npc"), title.vjust = 0.8,
+                       guide = guide_colorbar(order = 2, barwidth = grid::unit(0.4, "npc"), title.vjust = 0.8,
                                               title.position = "left")) +
   # Receiving stations locations
   geom_point(data = feb_site_locs, aes(x = recvLon, y = recvLat),
              pch = 7, color = "white", size = 2.5) +
   # Number of individuals detected
-  geom_text(aes(label = n_ind), color = "grey50", fontface = "bold", size = 3) + 
+  geom_text(data = feb_rekn_time_ant, aes(x = det_lon, y = det_lat, label = n_ind), 
+            color = "white", fontface = "bold", size = 3) + 
   annotate("point", x = -69.376211, y = -52.479484, color = "red", pch = 10, size = 3) +
-  theme(legend.position = "top",
+  xlim(c(-69.45, -68.7)) + ylim(c(-52.7, -52.4)) +
+  theme(legend.position = "top", 
         axis.text=element_blank(),
         axis.ticks=element_blank(),
         axis.title=element_blank(),
         plot.margin = unit(c(0, 0, 0, 0), "cm"))
 ```
+
+## Receiving station detections and association with tides
+
+Here we compare the proportional distribution of tide heights while each receiving station was active (grey background bars) with tide heights during Red Knot (REKN) detections. Detections at E. Pepita and E. El Pantano occur generally across the distribution of tide heights at those sites, with a slightly disproportionate increase in detection rate at some higher water levels (although not extreme high water at E. Pepita). In contrast, REKN are strongly disproportionately detected at E. MiraMar and Punta Catalina during very high tides, suggesting that knots are using these sites preferentially, or that they are restricted to more detectable areas, during very high water. These patterns are fairly consistent across different detection zones around each site; that is, the patterns apply generally around a station.
+
+```{r}
+# Load tide model
+load("Output/tide_model.rda")
+
+# Predict tide stage every minute for study period
+dts <- seq(as.POSIXct("2018-01-19 17:00", tz = "UTC"),
+           as.POSIXct("2018-06-01 11:00", tz = "UTC"),
+           by = 60)
+dts <- data.frame(date = as.Date(dts), ts = dts, tideHt = predict(tide_model, dts)) %>%
+  mutate(tideHt_m = cut(tideHt, breaks = -6:6, right = FALSE))
+dly_recv_log_tides <- filter(dly_recv_log, active) %>%
+  left_join(dts, by = "date")
+recv_tides <- dly_recv_log_tides %>%
+  group_by(recvSiteName, tideHt_m) %>%
+  summarize(hours = n()/60) %>%
+  group_by(recvSiteName) %>%
+  mutate(p_time = hours / sum(hours))
+
+# Add tide heights to detections
+rekn_chile_tides <- rekn_chile %>%
+  mutate(tideHt = predict(tide_model, ts),
+         tideHt_m = cut(tideHt, breaks = -6:6, right = FALSE)) %>%
+  filter(spp == "REKN")
+
+rekn_tides <- rekn_chile_tides %>%
+  group_by(recvSiteName, recvDeployID, port, tideHt_m) %>%
+  summarize(n_dets = n()) %>%
+  group_by(recvSiteName) %>%
+  mutate(p_time = n_dets / sum(n_dets)) %>%
+  left_join(bahia_recvs, by = c("recvSiteName", "recvDeployID", "port"))
+
+ggplot(rekn_tides, aes(x = tideHt_m, y = p_time)) + 
+  geom_bar(data = recv_tides, aes(x = tideHt_m, y = p_time), 
+           fill = "gray80", color = NA, stat = "identity") +
+  geom_bar(aes(color = antBin), size = 1, fill = NA, stat = "identity") +
+  facet_wrap(~ recvSiteName) + theme_bw() +
+  scale_x_discrete(labels = every_nth(levels(rekn_tides$tideHt_m), 2, inverse = TRUE)) +
+  labs(x = "Tide height (m) relative to Mean Sea Level (MSL)", y = "Proportion of time", 
+       color = "Antenna\ndirection")
+```
+
 
 ```{r, eval=FALSE}
 # Send to dedicated page on personal website
