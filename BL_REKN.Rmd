@@ -285,15 +285,23 @@ rekn_chile %>% ungroup() %>%
 
 ## Last detection by Bahia Lomas station (weekly)
 
-Weekly number of Hudsonian Godwits (HUGO) and Red Knots (REKN) last detected by Bahia Lomas receiving stations. Lines across the top of the HUGO plot illustrate the period that each station was actively listening for tagged birds. Which receivers last detected Red Knots? The site nearest the capture location, E. Pepita, most commonly was the last station of detection for Red Knots, followed by E. El Pantano and E. MiraMar, though their relative importance is somewhat complicated by the fact that E. Miramar was inactive from mid-February through early April and Punta Catalina functioned consistently only through mid/late-March and sporadically thereafter. With that said, the area around Punta Catalina seemed to be used very infrequently by tagged birds relative to E. Pepita in particular, but also E. El Pantano and E. MiraMar when all stations were active (refer to above figures).
+Weekly number of Hudsonian Godwits (HUGO) and Red Knots (REKN) last detected by Bahia Lomas receiving stations. Lines across the top of the HUGO plot illustrate the period that each station was actively listening for tagged birds. Which receivers last detected Red Knots? Solid vertical line is the median date of last detection; dashed vertical lines indicate the 10^th^ and 90^th^ percentiles of last detection (pretty meaningless for HUGO). The site nearest the capture location, E. Pepita, most commonly was the last station of detection for Red Knots, followed by E. El Pantano and E. MiraMar, though their relative importance is somewhat complicated by the fact that E. Miramar was inactive from mid-February through early April and Punta Catalina functioned consistently only through mid/late-March and sporadically thereafter. With that said, the area around Punta Catalina seemed to be used very infrequently by tagged birds relative to E. Pepita in particular, but also E. El Pantano and E. MiraMar when all stations were active (refer to above figures).
 
 ```{r}
+quants <- chile_summary %>%
+  group_by(spp) %>%
+  summarize(l10 = as.Date(quantile(finalChile, probs = .1)),
+            median = as.Date(quantile(finalChile, probs = 0.5)),
+            u90 = as.Date(quantile(finalChile, probs = .9)))
 chile_summary %>%
   ggplot(aes(x = leave_date, color = leave_stn, fill = leave_stn)) +
   geom_histogram(binwidth = 7) +
   geom_path(data = show_active_recv(2.77, 0.1, "leave_stn", NA_inactive = TRUE, input = dly_recv_log), 
             aes(date, y), lwd = 1) +
   scale_y_continuous(breaks = pretty_breaks(n = 4)) +
+  geom_vline(data = quants, aes(xintercept = l10), lwd = 1, lty = "dashed") +
+  geom_vline(data = quants, aes(xintercept = u90), lwd = 1, lty = "dashed") +
+  geom_vline(data = quants, aes(xintercept = median), lwd = 1) +
   facet_grid(spp ~ ., scales = "free_y") + theme_bw() +
   labs(x = "Last week detected", y = "# individuals", color = "", fill = "")
 ```
