@@ -88,6 +88,7 @@ chile_summary <- rekn_chile %>%
   mutate(chileStay = as.numeric(difftime(finalChile, tagDeployStart, units = "days")))
 ```
 
+
 ```{r receivers, cache=TRUE}
 # Network-wide receiver information
 motus_recvs_full <- tagme(proj, update = get_update, forceMeta = TRUE, dir = "Data/") %>%
@@ -122,7 +123,7 @@ bahia_recvs <- left_join(bahia_recvs, bahia_ants, by = "recvDeployID") %>%
          tsEnd = as_datetime(tsEnd, tz = "UTC")) %>%
   filter(tsStart < as.POSIXct("2018-07-31")) %>%
   select(recvDeployID, recvSiteName = siteName, tsStart, tsEnd, 
-         recvLat = latitude, recvLon = longitude, port, antennaType, antBin) %>%
+         recvLat = latitude, recvLon = longitude, port, antennaType, trueBearing, antBin) %>%
   left_join(compass, by = "antBin") %>%
   # Approximate center of detection zones for each antenna and add to receiver data
   group_by_all() %>%
@@ -132,11 +133,49 @@ bahia_recvs <- left_join(bahia_recvs, bahia_ants, by = "recvDeployID") %>%
 ep0 <- ungroup(bahia_recvs) %>% filter(recvSiteName == "E. Pepita", port == 1) %>%
   mutate(port = 0)
 bahia_recvs <- bind_rows(bahia_recvs, ep0)
+recvs_utm <- bahia_recvs %>% st_as_sf(coords = c("recvLon", "recvLat"), crs = 4326) %>%
+  st_transform(32719) %>% sfc_as_cols(c("utmx", "utmy")) %>% as.data.frame() %>%
+  select(recvSiteName, recvDeployID, port, trueBearing, antBin, antBinDeg, utmx, utmy) %>%
+  group_by(recvSiteName, antBin, utmx, utmy) %>%
+  summarize(trueBearing = mean(trueBearing))
+recvs_utm <- recvs_utm %>% rowwise() %>%
+  mutate(geom = make_ellipse(utmx, utmy, trueBearing, crs = 32719)) %>%
+  ungroup() %>% 
+  st_sf() 
 ```
 
-# Bahia Lomas receiver station activity and detection summary
+# Bahia Lomas receiver station habitat, activity, and detection summary
 
 The receiving station at Buque Quemado never functioned correctly (and thus never detected a single individual) and is excluded from further consideration. All remaining stations comprised three active antennas. Thus, in site-level summaries, we do not attempt to adjust detection numbers or times based on the number of active antennas.
+
+**Stu, please confirm the orientation of antennas before I summarize habitat in these assumed primary detection zones for birds on the ground.** Given current bearings (true north), a few antennas seem aligned primarily over upland (NW @ E. Pepita, NW @ E. Miramar, ENE @ E. El Plantano).
+
+```{r}
+m <- mapview::mapview(recvs_utm, zcol = "recvSiteName", map.types = "Esri.WorldImagery")
+m@map
+# Bring in detailed habitat raster, "fix" extent, filter to intertidal, ection prior to reprojection as sf object
+# bl_hab <- raster("Data/lslt_sntl_int_hybrid_final2.img")
+# bl_hab[bl_hab < 1] <- NA
+# bl_hab <- trim(bl_hab)
+# 
+# bl_hab_lu <- data.frame(hab_code = 1:12,
+#                         habitat = c("mud", "mud - channelized", "mud - outer flat", 
+#                                     "sandy mud", "muddy sand ", "muddy sand - channelized", 
+#                                     "muddy sand with cobble", "loamy sand", "loamy sand - channelized", 
+#                                     "rock flat with mussels/pools", "cobble beach", "salicornia/tidal wetland"),
+#                         habitat_gen = c(rep("mud", 3), rep("mud/sand", 4), 
+#                                         rep("loamy sand", 2), "rock flat with mussels/pools", 
+#                                         "cobble beach", "tidal wetland"),
+#                         stringsAsFactors = FALSE)
+# hab <- bl_hab %>%
+#   projectRaster(crs = CRS("+init=epsg:4326"), method = "ngb") %>%
+#   as.data.frame(xy = TRUE) %>%
+#   filter(!is.na(bahia_lomas_habitats_v3),
+#          bahia_lomas_habitats_v3 %in% 2:3) %>%
+#   select(x, y, hab_code = bahia_lomas_habitats_v3) %>%
+#   mutate(habitat = ifelse(hab_code == 2, "Mud-dominated", "Sand-dominated"))
+```
+
 
 ```{r, cache=TRUE, fig.height=2}
 dly_recv_log <- ungroup(bahia_recvs) %>% select(recvSiteName:tsEnd) %>%
