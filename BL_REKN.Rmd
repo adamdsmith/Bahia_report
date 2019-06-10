@@ -153,20 +153,31 @@ The receiving station at Buque Quemado never functioned correctly (and thus neve
 ```{r}
 m <- mapview::mapview(recvs_utm, zcol = "recvSiteName", map.types = "Esri.WorldImagery")
 m@map
+
 # Bring in detailed habitat raster, "fix" extent, filter to intertidal, ection prior to reprojection as sf object
-# bl_hab <- raster("Data/lslt_sntl_int_hybrid_final2.img")
-# bl_hab[bl_hab < 1] <- NA
-# bl_hab <- trim(bl_hab)
-# 
-# bl_hab_lu <- data.frame(hab_code = 1:12,
-#                         habitat = c("mud", "mud - channelized", "mud - outer flat", 
-#                                     "sandy mud", "muddy sand ", "muddy sand - channelized", 
-#                                     "muddy sand with cobble", "loamy sand", "loamy sand - channelized", 
-#                                     "rock flat with mussels/pools", "cobble beach", "salicornia/tidal wetland"),
-#                         habitat_gen = c(rep("mud", 3), rep("mud/sand", 4), 
-#                                         rep("loamy sand", 2), "rock flat with mussels/pools", 
-#                                         "cobble beach", "tidal wetland"),
-#                         stringsAsFactors = FALSE)
+bl_hab <- raster("Data/lslt_sntl_int_hybrid_final2.img")
+bl_hab[bl_hab < 1] <- NA
+bl_hab <- trim(bl_hab) %>%
+  shift(x = 200, y = 9999900)
+recvs_raster <- fasterize(recvs_utm, bl_hab)
+bl_hab_lu <- data.frame(hab_code = 1:12,
+                        habitat = c("mud", "mud - channelized", "mud - outer flat",
+                                    "sandy mud", "muddy sand ", "muddy sand - channelized",
+                                    "muddy sand with cobble", "loamy sand", "loamy sand - channelized",
+                                    "rock flat with mussels/pools", "cobble beach", "salicornia/tidal wetland"),
+                        habitat_gen = c(rep("mud", 3), rep("mud/sand", 4),
+                                        rep("loamy sand", 2), "rock flat with mussels/pools",
+                                        "cobble beach", "tidal wetland"),
+                        stringsAsFactors = FALSE)
+ant_hab <- lapply(seq_len(nrow(recvs_utm)), function(i) {
+  ant_i <- fasterize(recvs_utm[i, ], bl_hab) %>% trim() 
+  ant_hab <- crop(bl_hab, ant_i) %>% mask(ant_i) %>%
+    as.data.frame() %>%
+    filter(!is.na(Class_Names)) %>%
+    group_by(Class_Names) %>% tally()
+  ant_i <- recvs_utm[i, ] %>%
+    as.data.frame() %>% select(-geom) 
+})
 # hab <- bl_hab %>%
 #   projectRaster(crs = CRS("+init=epsg:4326"), method = "ngb") %>%
 #   as.data.frame(xy = TRUE) %>%
