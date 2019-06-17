@@ -9,12 +9,13 @@ if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman", quie
 if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes", quiet = TRUE)
 if (!requireNamespace("nrsmisc", quietly = TRUE)) remotes::install_github("adamdsmith/nrsmisc")
 if (!requireNamespace("ggmap", quietly = TRUE)) remotes::install_github("dkahle/ggmap")
-pacman::p_load(reshape, raster, dplyr, tidyr, lubridate, sf, rnaturalearth, motus, nrsmisc, 
-               oce, RStoolbox, ggplot2, ggmap, scales)
+pacman::p_load(reshape, raster, dplyr, tidyr, purrr, lubridate, sf, rnaturalearth, motus, nrsmisc, 
+               oce, RStoolbox, ggplot2, ggmap, scales, cowplot, magick)
 source("R/detection_loc.R")
 source("R/show_active_recv.R")
 source("R/geo_helpers.R")
 source("R/tides.R")
+source("R/tide_plot.R")
 get_update <- FALSE
 # Set Google Maps API key
 register_google(Sys.getenv("goog_key"))
@@ -54,7 +55,10 @@ rekn <- rekn_full %>%
          chile = recvProjID == 174,
          label = paste(spp, motusTagID, sep = "_")) %>%
   group_by(motusTagID) %>%
-  mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days"))) %>%
+  mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days")),
+         recvSiteName = factor(recvSiteName, 
+                               levels = c("E. Pepita", "E. MiraMar", 
+                                          "E. El Pantano", "Punta Catalina"))) %>%
   select(spp, age, weight, motusTagID, mfgID, tagBI, tagDeployStart, tagDeployEnd, 
          date, ts, ts_hour, chile, since_rel, sig, runID, runLen, freqsd,
          recvSiteName, recvDeployID, port) %>%
@@ -124,6 +128,9 @@ bahia_recvs <- left_join(bahia_recvs, bahia_ants, by = "recvDeployID") %>%
   filter(tsStart < as.POSIXct("2018-07-31")) %>%
   select(recvDeployID, recvSiteName = siteName, tsStart, tsEnd, 
          recvLat = latitude, recvLon = longitude, port, antennaType, trueBearing, antBin) %>%
+  mutate(recvSiteName = factor(recvSiteName, 
+                               levels = c("E. Pepita", "E. MiraMar", 
+                                          "E. El Pantano", "Punta Catalina"))) %>%
   left_join(compass, by = "antBin") %>%
   # Approximate center of detection zones for each antenna and add to receiver data
   group_by_all() %>%
@@ -154,37 +161,46 @@ The receiving station at Buque Quemado never functioned correctly (and thus neve
 m <- mapview::mapview(recvs_utm, zcol = "recvSiteName", map.types = "Esri.WorldImagery")
 m@map
 
-# Bring in detailed habitat raster, "fix" extent, filter to intertidal, ection prior to reprojection as sf object
+# Bring in detailed habitat raster, "fix" extent
 bl_hab <- raster("Data/lslt_sntl_int_hybrid_final2.img")
+crs(bl_hab) <- CRS('+init=EPSG:32719')
 bl_hab[bl_hab < 1] <- NA
 bl_hab <- trim(bl_hab) %>%
   shift(x = 200, y = 9999900)
-recvs_raster <- fasterize(recvs_utm, bl_hab)
 bl_hab_lu <- data.frame(hab_code = 1:12,
                         habitat = c("mud", "mud - channelized", "mud - outer flat",
                                     "sandy mud", "muddy sand ", "muddy sand - channelized",
                                     "muddy sand with cobble", "loamy sand", "loamy sand - channelized",
                                     "rock flat with mussels/pools", "cobble beach", "salicornia/tidal wetland"),
-                        habitat_gen = c(rep("mud", 3), rep("mud/sand", 4),
-                                        rep("loamy sand", 2), "rock flat with mussels/pools",
-                                        "cobble beach", "tidal wetland"),
+                        habitat_gen = factor(c(rep("mud", 3), rep("mud/sand", 4),
+                                               rep("loamy sand", 2), "rock flat with mussels/pools",
+                                               "cobble beach", "tidal wetland"),
+                                             levels = rev(c("mud", "mud/sand", "loamy sand", "tidal wetland", 
+                                                        "rock flat with mussels/pools", "cobble beach"))),
                         stringsAsFactors = FALSE)
-ant_hab <- lapply(seq_len(nrow(recvs_utm)), function(i) {
-  ant_i <- fasterize(recvs_utm[i, ], bl_hab) %>% trim() 
-  ant_hab <- crop(bl_hab, ant_i) %>% mask(ant_i) %>%
-    as.data.frame() %>%
-    filter(!is.na(Class_Names)) %>%
-    group_by(Class_Names) %>% tally()
-  ant_i <- recvs_utm[i, ] %>%
-    as.data.frame() %>% select(-geom) 
-})
-# hab <- bl_hab %>%
-#   projectRaster(crs = CRS("+init=epsg:4326"), method = "ngb") %>%
-#   as.data.frame(xy = TRUE) %>%
-#   filter(!is.na(bahia_lomas_habitats_v3),
-#          bahia_lomas_habitats_v3 %in% 2:3) %>%
-#   select(x, y, hab_code = bahia_lomas_habitats_v3) %>%
-#   mutate(habitat = ifelse(hab_code == 2, "Mud-dominated", "Sand-dominated"))
+
+recv_hab_rast <- raster::extract(bl_hab, as(recvs_utm, "Spatial"), df = TRUE) %>%
+  rename(hab_code = lslt_sntl_int_hybrid_final2) %>%
+  filter(!is.na(hab_code)) %>%
+  group_by(ID, hab_code) %>% 
+  summarize(area_ha = n() * 15.81253 * 11.3834 / 10000)
+recvs_hab <- recvs_utm %>%
+  mutate(ID = 1:n()) %>%
+  left_join(recv_hab_rast, by = "ID") %>%
+  as.data.frame() %>%
+  select(recvSiteName, antBin, hab_code, area_ha) %>%
+  left_join(bl_hab_lu, by = "hab_code")
+recvs_hab_site <- recvs_hab %>%
+  group_by(recvSiteName, habitat_gen) %>%
+  summarize(area_ha = sum(area_ha))
+recvs_hab_ant <- recvs_hab %>%
+  group_by(recvSiteName, antBin, habitat_gen) %>%
+  summarize(area_ha = sum(area_ha))
+ggplot(recvs_hab_site, aes(x = recvSiteName, y = area_ha)) + 
+  geom_bar(aes(fill = habitat_gen), stat = "identity") + 
+  scale_fill_viridis_d("Intertidal habitat", option = "inferno", direction = -1) + 
+  labs(x = "Site", y = "Area (ha)") +
+  theme_bw()
 ```
 
 
@@ -360,7 +376,7 @@ chile_summary %>%
 
 This distinguishes Red Knot detections by receiving station antenna, showing the apparent relative site use within a station's detection zones as well as among stations. Points are located along the approximate antenna detection axis at a distance of 3 km from the receiving station. This again illustrates that most detections occurred near and northwest of the capture location (red crosshair) at E. Pepita, with considerably shorter total detection duration, and numbers of individuals detected, as one moves east along the southern shore of Bahia Lomas towards Punta Catalina. Note however that the relative use of E. MiraMar is likely considerably underestimated due to station failure from mid-February to early April. See the next figure for a more equitable comparison of the relative use of the three primary detection sites (E. Pepita, E. MiraMar, and E. El Platano). It is important to note that cumulative detection time is also a function of detectability, which is likely to be higher when birds are near the receiving station or flying. Thus, cumulative detection time is likely not strictly an index of site use or importance. 
 
-```{r, fig.height=6, cache=TRUE}
+```{r, fig.height=7, cache=TRUE}
 # recvs <- pull(bahia_recvs, recvSiteName) %>% unique()
 # recvs <- recvs[c(2,1,3,4)]
 ant_avail <- ungroup(bahia_recvs) %>% select(recvSiteName, antBin, det_lon, det_lat) %>% distinct()
@@ -379,27 +395,24 @@ bl <- get_map(location = c(lon = -69.09, lat = -52.57), scale = 4, zoom = 10, ma
 bl_rast <- ggmap_rast(bl)
 projection(bl_rast) <- CRS("+init=epsg:4326") # bounding box projection
 
-# Bring in habitat raster, "fix" extent, filter to intertidal, ection prior to reprojection as sf object
-hab <- raster("Data/bahia_lomas_habitats_v3.img") %>%
-  shift(x = 200, y = 9999900) %>%
+# Convert habitat raster to data.frame
+hab <- bl_hab %>%
   projectRaster(crs = CRS("+init=epsg:4326"), method = "ngb") %>%
   as.data.frame(xy = TRUE) %>%
-  filter(!is.na(bahia_lomas_habitats_v3),
-         bahia_lomas_habitats_v3 %in% 2:3) %>%
-  select(x, y, hab_code = bahia_lomas_habitats_v3) %>%
-  mutate(habitat = ifelse(hab_code == 2, "Mud-dominated", "Sand-dominated"))
+  filter(!is.na(lslt_sntl_int_hybrid_final2)) %>%
+  select(x, y, hab_code = lslt_sntl_int_hybrid_final2) %>%
+  left_join(bl_hab_lu, by = "hab_code")
 
 site_locs <- group_by(bahia_recvs, recvSiteName) %>% slice(1)
 
 ggRGB(bl_rast) +
   coord_sf(crs = 4326) +
-  geom_tile(data = hab, aes(x, y, fill = habitat), alpha = 0.5) + 
+  geom_tile(data = hab, aes(x, y, fill = habitat_gen)) + 
   geom_point(data = rekn_time_ant, aes(x = det_lon, y = det_lat,
              size = tot_det_len, color = tot_det_len),
              shape = 21, fill = NA, stroke = 3) +
   scale_size(guide = "none", range = c(5,12)) + theme_bw() +
-  scale_fill_manual("Intertidal flat type",
-                    values = c("saddlebrown", "khaki1"),
+  scale_fill_viridis_d("Intertidal habitat", direction = -1, option = "inferno", 
                     guide = guide_legend(order = 1, direction = "vertical")) +
   scale_color_viridis_c("Cumulative detection time:", trans = "log2",
                        breaks = c(0.0166666, 1, 24, 168, 720, 3600),
@@ -412,39 +425,17 @@ ggRGB(bl_rast) +
   geom_point(data = site_locs, aes(x = recvLon, y = recvLat),
              pch = 7, color = "white", size = 2.5) +
   # Number of individuals detected
-  geom_text(data = rekn_time_ant, aes(x = det_lon, y = det_lat, label = n_ind), 
+  geom_text(data = rekn_time_ant, aes(x = det_lon, y = det_lat+0.001, label = n_ind), 
             color = "white", fontface = "bold", size = 3) + 
   annotate("point", x = -69.376211, y = -52.479484, color = "red", pch = 10, size = 3) +
   xlim(c(-69.45, -68.7)) + ylim(c(-52.7, -52.4)) +
   theme(legend.position = "top", 
+        legend.box.just = "bottom",
         axis.text=element_blank(),
         axis.ticks=element_blank(),
         axis.title=element_blank(),
         plot.margin = unit(c(0, 0, 0, 0), "cm"))
 
-# rekn_su <- lapply(recvs, function(r) {
-#   r_loc_df <- filter(bahia_recvs, recvSiteName == r)[1, c("recvLat", "recvLon")]
-#   r_loc <- unlist(r_loc_df) %>% unname()
-#   r_bl <- get_map(location = c(lon = r_loc[2], lat = r_loc[1]), zoom = 13, maptype = "satellite")
-#   r_tmp <- filter(rekn_time_ant, recvSiteName ==r)
-#   ggmap(r_bl, extent = "device",
-#         base_layer = ggplot(aes(x = det_lon, y = det_lat), data = r_tmp)) +
-#     geom_point(aes(size = tot_det_len, fill = tot_det_len), pch = 21) +
-#     scale_size_area(guide = "none") + theme_bw() +
-#     scale_fill_viridis_c("detection time (hours):",
-#                           guide = guide_colorbar(barwidth = grid::unit(0.15, "npc"), title.vjust = 0.8,
-#                                                  title.position = "left")) +
-#     geom_point(data = r_loc_df, aes(x = recvLon, y = recvLat),
-#                pch = 7, color = "white", fill = "grey50", size = 2) +
-#     theme(legend.position = "top",
-#           axis.ticks=element_blank(),
-#           axis.title=element_blank(),
-#           plot.margin = unit(c(0, 0, 1, 0), "cm")) +
-#     ggtitle(r)
-# })
-# cowplot::plot_grid(plotlist = rekn_su, align = "hv", axis = "tblr")
-
-  # Add receiver activity
 ```
 
 ## Relative Red Knot detections within and among stations (peak activity)
@@ -467,13 +458,12 @@ feb_site_locs <- filter(bahia_recvs, !grepl("Catalina", recvSiteName)) %>%
 
 ggRGB(bl_rast) +
   coord_sf(crs = 4326) +
-  geom_tile(data = hab, aes(x, y, fill = habitat), alpha = 0.5) + 
+  geom_tile(data = hab, aes(x, y, fill = habitat_gen)) + 
   geom_point(data = feb_rekn_time_ant, aes(x = det_lon, y = det_lat,
                                            size = tot_det_len, color = tot_det_len), 
              shape = 21, fill = NA, stroke = 3) +
   scale_size(guide = "none", range = c(5,12)) + theme_bw() +
-  scale_fill_manual("Intertidal flat type",
-                    values = c("saddlebrown", "khaki1"),
+  scale_fill_viridis_d("Intertidal habitat", direction = -1, option = "inferno", 
                     guide = guide_legend(order = 1, direction = "vertical")) +
   scale_color_viridis_c("Cumulative detection time:", trans = "log2",
                        breaks = c(1, 24, 168, 720, 2160),
@@ -485,11 +475,12 @@ ggRGB(bl_rast) +
   geom_point(data = feb_site_locs, aes(x = recvLon, y = recvLat),
              pch = 7, color = "white", size = 2.5) +
   # Number of individuals detected
-  geom_text(data = feb_rekn_time_ant, aes(x = det_lon, y = det_lat, label = n_ind), 
+  geom_text(data = feb_rekn_time_ant, aes(x = det_lon, y = det_lat+0.001, label = n_ind), 
             color = "white", fontface = "bold", size = 3) + 
   annotate("point", x = -69.376211, y = -52.479484, color = "red", pch = 10, size = 3) +
   xlim(c(-69.45, -68.7)) + ylim(c(-52.7, -52.4)) +
   theme(legend.position = "top", 
+        legend.box.just = "bottom",
         axis.text=element_blank(),
         axis.ticks=element_blank(),
         axis.title=element_blank(),
@@ -541,6 +532,91 @@ ggplot(rekn_tides, aes(x = tideHt_m, y = p_time)) +
        color = "Antenna\ndirection")
 ```
 
+```{r animations}
+# Mean hourly predicted tide height
+hourly_tides <- dts %>%
+  filter(between(date, ymd("2018-01-20"), ymd("2018-02-15"))) %>%
+  mutate(ts_hour = as.POSIXct(round(ts, "hours"))) %>%
+  group_by(ts_hour) %>%
+  summarize(tideHt = mean(tideHt),
+            tideHt_m = cut(tideHt, breaks = -6:6, right = FALSE))
+tide_range <- range(hourly_tides$tideHt)
+uniq_hrs <- pull(hourly_tides, ts_hour) %>% unique() %>% sort()
+# Hourly detection times/individuals by antenna during peak period
+
+rekn_h_peak <- rekn_times_h_chile %>% ungroup() %>%
+  filter(spp == "REKN", 
+         between(date, ymd("2018-01-20"), ymd("2018-02-15"))) 
+
+hourly_summary <- group_by(rekn_h_peak, ts_hour) %>%
+  summarize(hourly_indiv = n_distinct(motusTagID),
+            hourly_det_time = sum(det_len)) %>%
+  complete(ts_hour = uniq_hrs, fill = list( hourly_indiv = 0, hourly_det_time = 0))
+
+rekn_h_peak <- rekn_h_peak %>%
+  left_join(bahia_recvs, by = c("recvSiteName", "recvDeployID", "port")) %>%
+  group_by(ts_hour, recvSiteName, antBin, det_lat, det_lon) %>%
+  summarize(tot_det_h = sum(det_len)/60,
+            n_ind = n_distinct(motusTagID)) 
+
+# Assemble tide vs. habitat animation
+generate_anim <- TRUE
+if (generate_anim) {
+  uniq_hrs %>%
+  map(tide_plot, vs = "habitat", tide_dat = hourly_tides, tide_range = tide_range, 
+      det_dat = rekn_h_peak, hab_dat = recvs_hab_ant, hrly_summary = hourly_summary) %>%
+  map(image_read) %>%
+  image_join() %>%
+  image_animate(fps = 2, loop = 1) %>%
+  image_write("Output/tide_habitat.gif")
+}
+
+# Assemble tide vs. detection location animation
+if (generate_anim) {
+  uniq_hrs %>%
+  map(tide_plot, vs = "location", tide_dat = hourly_tides, tide_range = tide_range, 
+      det_dat = rekn_h_peak, site_locs = feb_site_locs, bg_rast = bl_rast, hab_df = hab) %>%
+  map(image_read) %>%
+  image_join() %>%
+  image_animate(fps = 2, loop = 1) %>%
+  image_write("Output/tide_location.gif")
+}
+
+```
+
+## Habitat "use" with tide as determined by relative detection time on different antennas
+
+Here we examine how tide may be associated with differential use of habitats using the relative detection time of Red Knots (REKN) on different antennas. Each antenna detects birds in a limited space, and that space can be approximated and associated with habitat. We constrain the "detection zone" of each antenna to an ellipse 2 km in length starting at the receiving station. The major axis of the ellipse aligns with the orientation of the antenna. For the minor axis of the ellipse we use a distance of 1.6 km at a distance of 1 km from the receiving station to approximate the detection width of the antenna based on the manufacturer's specifications (see interactive figure at top of this document to visualize these "primary detection zones for REKN on the ground." While only a subjective approximation, we think this best reflects the detection zone of each antenna for a REKN on the ground. REKN detected while flying may be detected at much greater ranges, but we have no way to identify flying REKN versus REKN on the ground. Whether it represents selection for habitats or simply a use of habitat available, REKN detections at antennas with a higher proportion of mud occurred at the highest predicted tides. Based on the habitat map above, it appears that "mud" habitats are likely among the last to flood with high tides.
+
+
+```{r}
+rekn_h_hab_tide <- rekn_times_h_chile %>% ungroup() %>%
+  filter(spp == "REKN", 
+         between(date, ymd("2018-01-20"), ymd("2018-02-15"))) %>%
+  # Add receiver metadata
+  left_join(bahia_recvs, by = c("recvSiteName", "recvDeployID", "port")) %>%
+  # Add receiver habitat 
+  left_join(recvs_hab_ant, by = c("recvSiteName", "antBin")) %>%
+  filter(recvSiteName != "Punta Catalina") %>% droplevels() %>%
+  # Add tide data
+  left_join(hourly_tides, by = "ts_hour") %>%
+  select(ts_hour, tideHt_m, habitat_gen, area_ha, det_len) %>%
+  mutate(hab_time = area_ha * det_len) %>%
+  group_by(tideHt_m, habitat_gen) %>%
+  summarize(rel_use = sum(hab_time)) %>%
+  group_by(tideHt_m) %>%
+  mutate(rel_prop = rel_use/sum(rel_use))
+
+ggplot(rekn_h_hab_tide, aes(x = tideHt_m, y = rel_prop)) + 
+  geom_bar(aes(fill = habitat_gen), color = NA, stat = "identity") +
+  scale_fill_viridis_d("Intertidal habitat", direction = -1, option = "inferno", 
+                       guide = guide_legend(order = 1, direction = "vertical")) +
+  theme_bw() +
+  scale_x_discrete(labels = every_nth(levels(rekn_tides$tideHt_m), 2, inverse = TRUE)) +
+  labs(x = "Predicted tide height (m) relative to Mean Sea Level (MSL)", 
+       y = "Relative detection time")
+
+```
 
 ```{r, eval=FALSE}
 # Send to dedicated page on personal website
