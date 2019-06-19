@@ -11,21 +11,20 @@ tide_plot <- function(h, vs = c("habitat", "location"), tide_dat = NULL, tide_ra
   tmp <- filter(tide_dat, between(ts_hour, hr_range[1], hr_range[2]))
   current <- filter(tide_dat, ts_hour == h)
   
-  # Tide plot
-  tide_gg <- ggplot(tmp, aes(ts_hour, tideHt)) +
-    geom_line(color = "gray50", size = 1.5) +
-    geom_point(data = current, size = 2.5, stroke = 2, shape = 21) +
-    geom_hline(aes(yintercept = tide_range[2]), lty = "dashed", size = 2, col = "grey20") +
-    geom_hline(aes(yintercept = tide_range[1]), lty = "dashed", size = 2, col = "grey20") +
-    scale_y_continuous("Tide height (m)", limits = c(floor(tide_range[1]), ceiling(tide_range[2]))) +
-    scale_x_datetime("", breaks = hr_breaks, labels = date_format("%d %b %H:%M"),
-                     limits = hr_range, expand = c(0, 0)) +
-    theme_bw() +
-    theme(axis.text.x = element_text(angle = 25, vjust = 1.0, hjust = 1.0),
-          axis.title.x = element_blank(),
-          plot.margin = unit(c(0, 0, 0, 0), "cm"))
-  
   if (vs == "habitat") {
+    # Tide plot
+    tide_gg <- ggplot(tmp, aes(ts_hour, tideHt)) +
+      geom_line(color = "gray50", size = 1.5) +
+      geom_point(data = current, size = 2.5, stroke = 2, shape = 21) +
+      geom_hline(aes(yintercept = tide_range[2]), lty = "dashed", size = 2, col = "grey20") +
+      geom_hline(aes(yintercept = tide_range[1]), lty = "dashed", size = 2, col = "grey20") +
+      scale_y_continuous("Tide height (m)", limits = c(floor(tide_range[1]), ceiling(tide_range[2]))) +
+      scale_x_datetime("", breaks = hr_breaks, labels = date_format("%d %b %H:%M"),
+                       limits = hr_range, expand = c(0, 0)) +
+      theme(axis.text.x = element_text(angle = 25, vjust = 1.0, hjust = 1.0),
+            axis.title.x = element_blank(),
+            plot.margin = unit(c(0, 0, 0, 0), "cm"))
+
     h_hrly_summary <- filter(hourly_summary, ts_hour == h)
     hourly_indiv <- h_hrly_summary$hourly_indiv
     hourly_det_time <- h_hrly_summary$hourly_det_time
@@ -54,11 +53,37 @@ tide_plot <- function(h, vs = c("habitat", "location"), tide_dat = NULL, tide_ra
                          limits = c(0, 0.8),
                          breaks = seq(0, 0.8, length.out = 5)) +
       guides(fill = "none") +
-      theme_bw() +
       theme(axis.text.x = element_text(angle = 25, vjust = 1.0, hjust = 1.0),
             axis.title.x = element_blank(),
             plot.margin = unit(c(0, 0, 0, 0), "cm"))
+    
+    out_gg <- cowplot::plot_grid(tide_gg, vs_gg, ncol = 1, axis = "lr", align = "h", rel_heights = c(1,1.5))
+    
   } else {
+    # Modify tide plot for overlay
+    # Tide plot
+    tide_gg <- ggplot(tmp, aes(ts_hour, tideHt)) +
+      geom_line(color = "gray50", size = 1.5) +
+      geom_point(data = current, color = "white", size = 2, stroke = 1.5, shape = 21) +
+      geom_hline(aes(yintercept = tide_range[2]), lty = "dashed", size = 1.5, col = "grey80") +
+      geom_hline(aes(yintercept = tide_range[1]), lty = "dashed", size = 1.5, col = "grey80") +
+      scale_y_continuous("Predicted\nttide height (m)", limits = c(floor(tide_range[1]), ceiling(tide_range[2]))) +
+      scale_x_datetime("", breaks = hr_breaks, labels = date_format("%d %b %H:%M"),
+                       limits = hr_range, expand = c(0, 0)) +
+      theme(panel.border = element_rect(fill = NA, color = "white"),
+            panel.background = element_rect(fill = NA), # bg of the panel
+            plot.background = element_rect(fill = NA, color = NA), # bg of the plot
+            axis.title = element_text(color = "white", size = 9),
+            axis.text = element_text(color = "white", size = 6),
+            axis.line = element_line(color = "white"),
+            axis.text.x = element_text(angle = 25, vjust = 1.0, hjust = 1.0, color = "white"),
+            axis.title.x = element_blank(),
+            axis.ticks = element_line(color = "white"),
+            panel.grid.major = element_line(color = "white"),
+            panel.grid.major.x = element_blank(),
+            panel.grid.minor = element_blank(),
+            plot.margin = unit(c(0.1, 0.1, 0, 0), "cm"))
+    
     h_det <- filter(det_dat, ts_hour == h) %>%
       ungroup() %>%
       complete(ts_hour = h, ant_avail, 
@@ -88,15 +113,14 @@ tide_plot <- function(h, vs = c("habitat", "location"), tide_dat = NULL, tide_ra
                 color = "white", fontface = "bold", size = 3) + 
       annotate("point", x = -69.376211, y = -52.479484, color = "red", pch = 10, size = 3) +
       xlim(c(-69.45, -68.7)) + ylim(c(-52.7, -52.4)) +
-      theme(legend.position = "bottom",
-            axis.text=element_blank(),
-            axis.ticks=element_blank(),
-            axis.title=element_blank(),
-            plot.margin = unit(c(1, 0, 0, 0), "cm"))
+      theme_nothing() + 
+      theme(legend.position = "bottom")
+    
+    out_gg <- ggdraw(vs_gg) +
+      draw_plot(tide_gg, x = 0.3, y = 0.66, width = 0.7, height = 0.325)
+    
   }
-
-  out_gg <- cowplot::plot_grid(tide_gg, vs_gg, ncol = 1, axis = "lr", align = "h", rel_heights = c(1,1.5))
   out_file <- sprintf("tmp/gg-tide-%s-%s.png", vs, format(h, format = "%d-%b-%H00"))
-  ggsave(out_file, out_gg, width=6.5, height=9, dpi=150)
+  ggsave(out_file, out_gg, width=ifelse(vs == "habitat", 6.5, 5.5), height=ifelse(vs == "habitat", 9, 4.5), dpi=150)
   out_file
 }
