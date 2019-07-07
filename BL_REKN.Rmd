@@ -10,7 +10,7 @@ if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes", qu
 if (!requireNamespace("nrsmisc", quietly = TRUE)) remotes::install_github("adamdsmith/nrsmisc")
 if (!requireNamespace("ggmap", quietly = TRUE)) remotes::install_github("dkahle/ggmap")
 pacman::p_load(reshape, raster, dplyr, tidyr, purrr, lubridate, sf, rnaturalearth, motus, nrsmisc, 
-               oce, RStoolbox, ggplot2, ggmap, scales, cowplot, magick)
+               oce, RStoolbox, ggplot2, ggforce, ggmap, scales, cowplot, magick)
 source("R/detection_loc.R")
 source("R/show_active_recv.R")
 source("R/geo_helpers.R")
@@ -42,11 +42,15 @@ rekn <- rekn_full %>%
   # Join with deployment info
   left_join(rekn_deploy, by = c("motusTagID" = "tagID")) %>%
   filter(motusTagID %in% rekn_deploy$tagID,   # Only Bahia Lomas project (#174) tags
-         runLen > 2,                          # Basic filter
-         freqsd < 0.075,                      # Basic filter
+         freqsd < 0.075,                      # Basic filter to remove likely spurious pulses
          !is.na(tagDeployLat),                # Omits one apparent test deployment?
+         !is.na(recvProjID),                  # Omits unknown detection projects
          ts > tagDeployStart,                 # Detections occur after deployment
          grepl("BahiaLomas", fullID)) %>%     # Only Bahia Lomas project (#174) tags
+  group_by(runID) %>%
+  mutate(runLen = n()) %>%                    # Calculate run length of non-spurious pulses
+  filter(runLen > 2) %>%
+  ungroup() %>%
   mutate(ts = as_datetime(ts, tz = "UTC"),
          tagDeployEnd = as_datetime(tagDeployEnd, tz = "UTC"),
          tagDeployStart = as_datetime(tagDeployStart, tz = "UTC"),
@@ -55,13 +59,10 @@ rekn <- rekn_full %>%
          chile = recvProjID == 174,
          label = paste(spp, motusTagID, sep = "_")) %>%
   group_by(motusTagID) %>%
-  mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days")),
-         recvSiteName = factor(recvSiteName, 
-                               levels = c("E. Pepita", "E. MiraMar", 
-                                          "E. El Pantano", "Punta Catalina"))) %>%
+  mutate(since_rel = as.numeric(difftime(ts, tagDeployStart, units = "days"))) %>%
   select(spp, age, weight, motusTagID, mfgID, tagBI, tagDeployStart, tagDeployEnd, 
          date, ts, ts_hour, chile, since_rel, sig, runID, runLen, freqsd,
-         recvSiteName, recvDeployID, port) %>%
+         recvSiteName, recvDeployID, port, recvDeployLat, recvDeployLon) %>%
   arrange(motusTagID, runID, ts)
 
 # Detection length
@@ -78,9 +79,18 @@ rekn_times_h <- rekn %>%
             det_len = ifelse(det_len < 0.05, round(min(tagBI)/60, 3), det_len),
             date = min(date),
             sigSD = sd(sig))
-rekn_chile <- filter(rekn, chile)
-rekn_times_chile <- filter(rekn_times, chile)
-rekn_times_h_chile <- filter(rekn_times_h, chile)
+rekn_chile <- filter(rekn, chile) %>% 
+  mutate(recvSiteName = factor(recvSiteName, 
+                               levels = c("E. Pepita", "E. MiraMar", 
+                                          "E. El Pantano", "Punta Catalina")))
+rekn_times_chile <- filter(rekn_times, chile) %>% ungroup() %>% 
+  mutate(recvSiteName = factor(recvSiteName, 
+                               levels = c("E. Pepita", "E. MiraMar", 
+                                          "E. El Pantano", "Punta Catalina")))
+rekn_times_h_chile <- filter(rekn_times_h, chile) %>% ungroup() %>%
+  mutate(recvSiteName = factor(recvSiteName, 
+                               levels = c("E. Pepita", "E. MiraMar", 
+                                          "E. El Pantano", "Punta Catalina")))
 
 chile_summary <- rekn_chile %>%
   group_by(tagDeployStart, spp, add = TRUE) %>%
@@ -197,7 +207,7 @@ recvs_hab_ant <- recvs_hab %>%
   group_by(recvSiteName, antBin, habitat_gen) %>%
   summarize(area_ha = sum(area_ha))
 ggplot(recvs_hab_site, aes(x = recvSiteName, y = area_ha)) + 
-  geom_bar(aes(fill = habitat_gen), stat = "identity") + 
+  geom_bar(aes(fill = habitat_gen), color = "black", stat = "identity") + 
   scale_fill_viridis_d("Intertidal habitat", option = "inferno", direction = -1) + 
   labs(x = "Site", y = "Area (ha)") +
   theme_bw()
@@ -622,4 +632,64 @@ ggplot(rekn_h_hab_tide, aes(x = tideHt_m, y = rel_prop)) +
 # Send to dedicated page on personal website
 rmarkdown::render("BL_REKN.Rmd", rmarkdown::html_document(pandoc_args = "--self-contained"), "~/R/adamdsmith.github.io/BL_REKN.html")
 ```
+
+```{r migratory_detections, cache = TRUE}
+non_chile_ids <- filter(rekn, !chile, runLen > 3, recvDeployLon < 0) %>%
+  pull(motusTagID) %>% unique()
+rekn_mig <- filter(rekn, runLen > 3, recvDeployLon < 0, motusTagID %in% non_chile_ids)
+
+# Non-Chile detections  
+non_chile_det <- filter(rekn_mig, !chile)
+# bad_mojo <- c(27401,)
+pdf("Output/non_chile_runs.pdf")
+for(i in 1:24){
+  p <- ggplot(non_chile_det) + geom_point(aes(x = ts, y = sig)) + 
+    facet_wrap_paginate(~ runID, ncol = 2, nrow = 6, page = i, scales = "free")
+  print(p)
+}
+dev.off()
+
+## base receiver map
+lakes <- rnaturalearth::ne_download(scale = 50, type = "lakes", category = "physical",
+                                    returnclass = "sf")
+worldmap <- rnaturalearth::ne_countries(scale = 50, returnclass = "sf")
+
+recv_map <- ggplot(data = worldmap) +
+  geom_sf(fill = "grey85", color = "grey15") +
+  geom_sf(data = lakes, fill = "white", color = "grey15") +
+  coord_sf(xlim = c(-110, -33), ylim = c(-57, 57), expand = FALSE) +
+  geom_point(data = active_recvs, aes(x = recvLon, y = recvLat), shape = 21,
+             fill = NA, color = "black") +
+  labs(x = NULL, y = NULL) + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+as.Date_origin <- function(x){
+  format(as.Date(x, origin = "1970-01-01"), format = "%d %b")
+}
+
+pdf("Output/rekn_detections.pdf")
+for(i in non_chile_ids) {
+  tmp <- filter(rekn_mig, motusTagID == i) %>%
+    group_by(recvSiteName, recvDeployLat, recvDeployLon, motusTagID) %>%
+    arrange(ts) %>%
+    slice(c(1,n()))
+  p <- recv_map +
+    geom_point(data = tmp, aes(x = recvDeployLon, y = recvDeployLat), 
+               size = 3, shape = 21, color = "darkred", fill = NA, stroke = 1.5) +
+    geom_point(data = tmp, aes(x = recvDeployLon, y = recvDeployLat, fill = as.integer(date)), 
+               shape = 21, color = "black") +
+    scale_fill_viridis_c("Date of last detection:", labels = as.Date_origin, 
+                         limits = as.integer(range(rekn_mig$date)),
+                         guide = guide_colorbar(direction = "horizontal",
+                                                barwidth = 20)) +
+    theme(legend.position = "top") +
+    ggtitle(paste0(unique(tmp$spp), ": ", unique(tmp$motusTagID)))
+  print(p)
+}
+dev.off()
+
+```
+
 

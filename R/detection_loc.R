@@ -11,7 +11,7 @@ detection_loc <- function(lat, lon, bearing, elems = 9, distkm = NULL) {
 # Create ellipse geometry in list-column 
 # For use as rowwise mutate
 make_ellipse <- function(x, y, brng, len_km = 2, wid_km = 1.6, crs = 32719) {
-  # Put axes lengths in km
+  # Put axes lengths in m
   maj <- len_km * 1000 / 2
   min <- wid_km * 1000 / 2
   # Convert bearing to radians
